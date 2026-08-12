@@ -91,6 +91,31 @@ zopen_init() {
   done
 }
 
+# cryptography declares cffi>=2.0.0, and cffi cannot be installed from PyPI on
+# z/OS: its sdist needs libffi headers that are not there, so the build fails
+# with "No such file or directory: /usr/include/ffi". The interpreters ship
+# their own cffi -- 1.17.1 on 3.12, 2.0.0 on 3.13 and 3.14 -- so the venv has to
+# be able to see it. zopen-build's own helper creates an isolated venv, which is
+# right for a port that builds from source and wrong here.
+#
+# 3.12's bundled 1.17.1 is below the declared floor, but the extension links
+# its own OpenSSL and only needs cffi for a narrow path; verified on-platform
+# that 50.0.0 imports and signs correctly against it. If that stops being true
+# the check will say so rather than pass quietly.
+#
+# Seeing system packages also means the interpreter-bundled cryptography 3.3.2
+# is importable, so a failed wheel install would silently test the old vulnerable
+# version instead. version_matches_label below is what stops that.
+_crypto_venv_for() {
+  _cv_dir=$(_zopen_python_venv_dir "$1")
+  if [ ! -f "${_cv_dir}/bin/activate" ]; then
+    printInfo "Creating virtual environment for ${1} in ${_cv_dir} (with system packages)"
+    "$(_zopen_python_interpreter_path "$1")" -m venv --system-site-packages "${_cv_dir}" || return 1
+  fi
+  . "${_cv_dir}/bin/activate" || return 1
+  pip install --disable-pip-version-check --quiet setuptools build installer wheel
+}
+
 # Stands in for compiling. Everything the Python build system would do is still
 # done -- verify the interpreters, create a virtual environment for each, put
 # that interpreter's wheel in dist/, retag -- except the compiling itself. The
@@ -103,7 +128,7 @@ zopen_custom_build() {
   mkdir -p dist || return 1
 
   for _pv in $(_zopen_python_versions); do
-    _zopen_python_ensure_venv_for "${_pv}" || return 1
+    _crypto_venv_for "${_pv}" || return 1
     _tag="cp$(echo "${_pv}" | tr -d '.')"
     _src="wheels/cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-os390_29_00_8561.whl"
     if [ ! -f "${_src}" ]; then
@@ -119,7 +144,7 @@ zopen_custom_build() {
   # Retag to cp3XY-none-any so a wheel is not pinned to the z/OS release and
   # machine model of the box that produced it. The tag is read from each
   # wheel's own filename, so the interpreter active here does not matter.
-  _zopen_python_ensure_venv_for "$(_zopen_python_primary_version)" || return 1
+  _crypto_venv_for "$(_zopen_python_primary_version)" || return 1
   _zopen_python_retag_wheel
   _rc=$?
   deactivate
