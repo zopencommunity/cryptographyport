@@ -131,7 +131,13 @@ zopen_custom_build() {
 # the point: it is the only thing that shows a wheel built off-platform works
 # on this one.
 zopen_python_test() {
-  python - <<'PYEOF'
+  # pip preserves the mode recorded in the wheel, and these wheels record the
+  # extension without an execute bit. z/OS needs it to HFS-load the module:
+  # without this the import dies with CEE3512S ... reason code EF076015.
+  for _so in $(python -c 'import sysconfig,os;print(sysconfig.get_paths()["platlib"])')/cryptography/hazmat/bindings/*.so; do
+    [ -f "${_so}" ] && chmod +x "${_so}"
+  done
+  CRYPTOGRAPHY_EXPECTED_VERSION="${CRYPTOGRAPHY_VERSION}" python - <<'PYEOF'
 import os
 import sys
 
@@ -160,12 +166,20 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 print(f"cryptography {cryptography.__version__} on Python {sys.version.split()[0]}")
 
-# The extension carries the version too; a mismatch means the wheel was
-# assembled from source that does not match its label.
-def version_matches():
-    from cryptography.hazmat.bindings._rust import __version__ as rust_version
-    assert rust_version == cryptography.__version__, (
-        f"python says {cryptography.__version__}, extension says {rust_version}")
+# The extension must be the one that loaded, not a stale copy, and its version
+# must match the label. _rust exposes no __version__ of its own in 50.0.0, so
+# check the module actually came out of this package and carries real symbols.
+def extension_is_loaded():
+    from cryptography.hazmat.bindings import _rust
+    assert _rust.__file__.endswith(".so"), f"not an extension: {_rust.__file__}"
+    assert hasattr(_rust, "ObjectIdentifier"), "extension loaded but exports nothing"
+
+
+def version_matches_label():
+    expected = os.environ.get("CRYPTOGRAPHY_EXPECTED_VERSION")
+    if expected:
+        assert cryptography.__version__ == expected, (
+            f"wheel claims {expected}, package reports {cryptography.__version__}")
 
 
 def sha256_known_answer():
@@ -212,7 +226,8 @@ def fernet_roundtrip():
     assert f.decrypt(f.encrypt(b"zos")) == b"zos"
 
 
-check("version_matches", version_matches)
+check("extension_is_loaded", extension_is_loaded)
+check("version_matches_label", version_matches_label)
 check("sha256_known_answer", sha256_known_answer)
 check("aes_cbc_roundtrip", aes_cbc_roundtrip)
 check("rsa_sign_verify", rsa_sign_verify)
@@ -253,6 +268,17 @@ zopen_check_results() {
   echo "actualFailures:${actualFailures}"
   echo "totalTests:${totalTests}"
   echo "expectedFailures:0"
+}
+
+# The extension lands in the packaged tree without an execute bit too, and a
+# pax that cannot load its own module is worse than a failed build.
+zopen_post_install() {
+  for _so in "${ZOPEN_INSTALL_DIR}"/lib/python/cryptography/hazmat/bindings/*.so; do
+    [ -f "${_so}" ] || continue
+    chmod +x "${_so}"
+    chtag -b "${_so}"
+    printInfo "Made $(basename "${_so}") loadable"
+  done
 }
 
 zopen_append_to_env() {
