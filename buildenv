@@ -66,7 +66,25 @@ zopen_get_version() {
   echo "${CRYPTOGRAPHY_VERSION}"
 }
 
-# Fetch one prebuilt wheel per interpreter. The native name is used on purpose:
+# The platform tag in a native wheel's name is not a constant, so it cannot be
+# written literally here. 3.12 and 3.13 report os390_<release>_<model> while
+# 3.14 reports plain "zos", and the model field names the machine that built
+# the wheel -- 8561 is a machine type, not a property of the port. Hardcoding
+# one value already broke this port once: the 3.14 asset was re-uploaded under
+# the correct "zos" tag and every 3.14 build started failing on a 404 for a
+# name that no longer existed.
+#
+# So ask the interpreter what it calls this platform, then fall back to the
+# tags actually in use. Whichever exists is the right one, and a new tag only
+# needs adding to this list.
+_crypto_platform_tags() {
+  _pt_local=$("$(_zopen_python_interpreter_path "$1")" -c \
+    'import sysconfig; print(sysconfig.get_platform().replace("-","_").replace(".","_"))' \
+    2>/dev/null)
+  echo "${_pt_local} zos os390_29_00_8561"
+}
+
+# Fetch one prebuilt wheel per interpreter. The native name is kept on purpose:
 # letting _zopen_python_retag_wheel do the retagging rewrites the filename, the
 # WHEEL metadata and RECORD together. Renaming to -none-any by hand leaves the
 # internal tag saying os390_<release>_<model>, which is malformed per PEP 427
@@ -76,18 +94,37 @@ zopen_init() {
   mkdir -p wheels || return 1
   for _pv in $(_zopen_python_versions); do
     _tag="cp$(echo "${_pv}" | tr -d '.')"
-    _whl="cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-os390_29_00_8561.whl"
-    [ -f "wheels/${_whl}" ] && continue
-    printInfo "Fetching ${_whl}"
-    if ! curl -fsSL -o "wheels/${_whl}" "${WHEEL_BASE_URL}/${_whl}"; then
-      printSoftError "No prebuilt wheel for Python ${_pv} at ${WHEEL_BASE_URL}/${_whl}"
+
+    # already fetched on an earlier run, under whatever tag it carries
+    _have=""
+    for _cand in wheels/cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-*.whl; do
+      [ -f "${_cand}" ] && { _have="${_cand}"; break; }
+    done
+    [ -n "${_have}" ] && continue
+
+    _tried=""
+    _got=""
+    for _plat in $(_crypto_platform_tags "${_pv}"); do
+      case " ${_tried} " in *" ${_plat} "*) continue ;; esac
+      _tried="${_tried} ${_plat}"
+      _whl="cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-${_plat}.whl"
+      if curl -fsSL -o "wheels/${_whl}" "${WHEEL_BASE_URL}/${_whl}" 2>/dev/null; then
+        printInfo "Fetched ${_whl}"
+        # A wheel is a zip; tagging it as text invites conversion on read.
+        chtag -b "wheels/${_whl}"
+        _got="${_whl}"
+        break
+      fi
+      rm -f "wheels/${_whl}"
+    done
+
+    if [ -z "${_got}" ]; then
+      printSoftError "No prebuilt wheel for Python ${_pv} at ${WHEEL_BASE_URL}"
+      printSoftError "Tried platform tags:${_tried}"
       printSoftError "A Rust extension is built against one CPython ABI and cryptography"
       printSoftError "has no abi3 build, so each interpreter needs its own cross-compile."
-      rm -f "wheels/${_whl}"
       return 1
     fi
-    # A wheel is a zip; tagging it as text invites conversion on read.
-    chtag -b "wheels/${_whl}"
   done
 }
 
@@ -130,9 +167,14 @@ zopen_custom_build() {
   for _pv in $(_zopen_python_versions); do
     _crypto_venv_for "${_pv}" || return 1
     _tag="cp$(echo "${_pv}" | tr -d '.')"
-    _src="wheels/cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-os390_29_00_8561.whl"
-    if [ ! -f "${_src}" ]; then
-      printSoftError "No wheel staged for Python ${_pv}: ${_src}"
+    # Glob rather than reconstruct the name: zopen_init already resolved which
+    # platform tag exists, and it is not the same for every interpreter.
+    _src=""
+    for _cand in wheels/cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-*.whl; do
+      [ -f "${_cand}" ] && { _src="${_cand}"; break; }
+    done
+    if [ -z "${_src}" ]; then
+      printSoftError "No wheel staged for Python ${_pv} in wheels/"
       deactivate
       return 1
     fi
