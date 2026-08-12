@@ -1,134 +1,267 @@
+# bump: cryptography-version /CRYPTOGRAPHY_VERSION="(.*)"/ https://github.com/pyca/cryptography.git|semver:*
+CRYPTOGRAPHY_VERSION="50.0.0"
+
+###
+### Build control file for the cryptography port
+###
+### cryptography is a Rust extension linked against OpenSSL and cannot be
+### compiled natively on z/OS: there is no native Rust toolchain. Wheels are
+### cross-compiled on Linux-on-Power with IBM's Rust cross-compiler targeting
+### s390x-ibm-zos and attached to this repo's releases; the port downloads
+### them and puts them through the rest of the pipeline unchanged -- retagged,
+### imported and exercised on every interpreter, packaged and published.
+###
+### Same BARE arrangement as fdport and pydantic-coreport. Keeping
+### ZOPEN_BUILD_SYSTEM="Python" matters: it is what stages the wheels for the
+### wheel index and runs the check once per interpreter. A cross-compiled
+### binary nobody loaded is the main risk here, so nothing is published until
+### the interpreter it claims to support has actually run crypto with it.
+###
+### Why this port exists: IBM Open Enterprise SDK for Python bundles
+### cryptography 3.3.2 (February 2021), which has 22 known CVEs including
+### certificate-validation bypasses. 50.0.0 also satisfies every consumer we
+### have been asked for -- paramiko, msal, pyjwt[crypto], requests-pkcs12 and
+### snowflake-connector-python (which needs >=46.0.5).
+###
+
+export ZOPEN_PROJECT_NAME="cryptography"
 export ZOPEN_BUILD_LINE="STABLE"
-export ZOPEN_STABLE_TAG="50.0.0"
-export ZOPEN_STABLE_URL="https://github.com/pypa/cryptography/archive/refs/tags/50.0.0.tar.gz"
-export ZOPEN_STABLE_DEPS="check_python openssl zoslib"
 export ZOPEN_TYPE="BARE"
-export ZOPEN_CATEGORIES="python security"
 
-# Wheels built for each supported Python version.
-# Use the native-tagged wheel (cp3XY-cp3XY-os390_*) from the GitHub release.
-# The port downloads and installs the matching wheel for each interpreter.
-export ZOPEN_PYTHON_VERSIONS="3.12 3.13 3.14"
+# Required even though nothing is fetched from it: checkEnv exempts only
+# ZOPEN_TYPE=LOCAL, so a BARE port without a URL stops with "Building from
+# stable, but ZOPEN_STABLE_URL not specified". getCode returns early for BARE
+# and never clones. The upstream org is pyca, not pypa.
+export ZOPEN_STABLE_URL="https://github.com/pyca/cryptography.git"
+export ZOPEN_STABLE_TAG="${CRYPTOGRAPHY_VERSION}"
+# Same reason as the stable URL: the DEV line applies the identical check,
+# so an empty value fails a dev build before it starts.
+export ZOPEN_DEV_URL="https://github.com/pyca/cryptography.git"
 
-# Interpreter locations on z/OS (standard and install_test paths)
-# check_python exports ZOPEN_PYTHON_3_12 etc.; these are fallbacks.
-export ZOPEN_PYTHON_3_12=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
-export ZOPEN_PYTHON_3_13=/usr/lpp/IBM/cyp/v3r13/pyz/bin/python3
-export ZOPEN_PYTHON_3_14=/usr/lpp/IBM/python/v3r14/pyz/bin/python3
+export ZOPEN_STABLE_DEPS="check_python curl"
+export ZOPEN_DEV_DEPS="check_python curl"
+export ZOPEN_CATEGORIES="development security library"
 
-WHEEL_BASE_URL="https://github.com/zopencommunity/cryptographyport/releases/download/v50.0.0"
-WHEEL_VERSION="50.0.0"
+# openssl and zoslib are linked by the extension, so they must be present at
+# run time. Declaring them here makes .depsenv put their lib directories on
+# LIBPATH for anything that sources this port's .env.
+export ZOPEN_RUNTIME_DEPS="check_python openssl zoslib"
+
+export ZOPEN_BUILD_SYSTEM="Python"
+export ZOPEN_BOOTSTRAP="skip"
+export ZOPEN_CONFIGURE="skip"
+export ZOPEN_COMP="skip"
+export ZOPEN_MAKE="zopen_custom_build"
+
+# Interpreters are NOT hardcoded here. zopen-build consults
+# ZOPEN_PYTHON_<major>_<minor> (exported by check_python), then python<version>
+# on PATH. Setting them in a buildenv overrides that discovery rather than
+# supplementing it, and the literal paths are wrong on machines where a version
+# is installed somewhere else -- /usr/lpp/IBM/cyp/v3r13 is an empty directory on
+# every build agent checked so far.
+
+WHEEL_BASE_URL="https://github.com/zopencommunity/cryptographyport/releases/download/v${CRYPTOGRAPHY_VERSION}"
+
+zopen_get_version() {
+  echo "${CRYPTOGRAPHY_VERSION}"
+}
+
+# Fetch one prebuilt wheel per interpreter. The native name is used on purpose:
+# letting _zopen_python_retag_wheel do the retagging rewrites the filename, the
+# WHEEL metadata and RECORD together. Renaming to -none-any by hand leaves the
+# internal tag saying os390_<release>_<model>, which is malformed per PEP 427
+# and does not self-heal, because retagging treats a -none-any name carrying a
+# cp3XY python tag as already done.
+zopen_init() {
+  mkdir -p wheels || return 1
+  for _pv in $(_zopen_python_versions); do
+    _tag="cp$(echo "${_pv}" | tr -d '.')"
+    _whl="cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-os390_29_00_8561.whl"
+    [ -f "wheels/${_whl}" ] && continue
+    printInfo "Fetching ${_whl}"
+    if ! curl -fsSL -o "wheels/${_whl}" "${WHEEL_BASE_URL}/${_whl}"; then
+      printSoftError "No prebuilt wheel for Python ${_pv} at ${WHEEL_BASE_URL}/${_whl}"
+      printSoftError "A Rust extension is built against one CPython ABI and cryptography"
+      printSoftError "has no abi3 build, so each interpreter needs its own cross-compile."
+      rm -f "wheels/${_whl}"
+      return 1
+    fi
+    # A wheel is a zip; tagging it as text invites conversion on read.
+    chtag -b "wheels/${_whl}"
+  done
+}
+
+# Stands in for compiling. Everything the Python build system would do is still
+# done -- verify the interpreters, create a virtual environment for each, put
+# that interpreter's wheel in dist/, retag -- except the compiling itself. The
+# per-interpreter venv is not optional: the check phase runs in it and fails
+# with "No virtual environment at .venv-3.13" without it.
+zopen_custom_build() {
+  _zopen_python_verify_interpreters || return 1
+
+  rm -rf dist
+  mkdir -p dist || return 1
+
+  for _pv in $(_zopen_python_versions); do
+    _zopen_python_ensure_venv_for "${_pv}" || return 1
+    _tag="cp$(echo "${_pv}" | tr -d '.')"
+    _src="wheels/cryptography-${CRYPTOGRAPHY_VERSION}-${_tag}-${_tag}-os390_29_00_8561.whl"
+    if [ ! -f "${_src}" ]; then
+      printSoftError "No wheel staged for Python ${_pv}: ${_src}"
+      deactivate
+      return 1
+    fi
+    cp "${_src}" dist/ || { deactivate; return 1; }
+    printInfo "Staged $(basename "${_src}") for Python ${_pv}"
+    deactivate
+  done
+
+  # Retag to cp3XY-none-any so a wheel is not pinned to the z/OS release and
+  # machine model of the box that produced it. The tag is read from each
+  # wheel's own filename, so the interpreter active here does not matter.
+  _zopen_python_ensure_venv_for "$(_zopen_python_primary_version)" || return 1
+  _zopen_python_retag_wheel
+  _rc=$?
+  deactivate
+  return ${_rc}
+}
+
+# Called once per interpreter, with that interpreter's environment active and
+# its wheel already installed. Loading the extension and doing real crypto is
+# the point: it is the only thing that shows a wheel built off-platform works
+# on this one.
+zopen_python_test() {
+  python - <<'PYEOF'
+import os
+import sys
+
+failures = 0
+total = 0
+
+
+def check(label, fn):
+    global failures, total
+    total += 1
+    try:
+        fn()
+    except Exception as exc:
+        print(f"FAILED {label}: {exc}")
+        failures += 1
+        return
+    print(f"PASSED {label}")
+
+
+import cryptography
+from cryptography.fernet import Fernet
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+print(f"cryptography {cryptography.__version__} on Python {sys.version.split()[0]}")
+
+# The extension carries the version too; a mismatch means the wheel was
+# assembled from source that does not match its label.
+def version_matches():
+    from cryptography.hazmat.bindings._rust import __version__ as rust_version
+    assert rust_version == cryptography.__version__, (
+        f"python says {cryptography.__version__}, extension says {rust_version}")
+
+
+def sha256_known_answer():
+    d = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    d.update(b"hello z/OS")
+    assert d.finalize().hex() == (
+        "6dc1a19e0cb5f3f43c310e992f8a276fb884d826639af9f6f6b8c3fbbba038e2")
+
+
+def aes_cbc_roundtrip():
+    key, iv = os.urandom(32), os.urandom(16)
+    c = Cipher(algorithms.AES(key), modes.CBC(iv))
+    enc = c.encryptor()
+    ct = enc.update(b"0123456789abcdef") + enc.finalize()
+    dec = c.decryptor()
+    assert dec.update(ct) + dec.finalize() == b"0123456789abcdef"
+
+
+def rsa_sign_verify():
+    k = rsa.generate_private_key(65537, 2048)
+    sig = k.sign(b"test", padding.PKCS1v15(), hashes.SHA256())
+    k.public_key().verify(sig, b"test", padding.PKCS1v15(), hashes.SHA256())
+
+
+def rsa_rejects_bad_signature():
+    from cryptography.exceptions import InvalidSignature
+    k = rsa.generate_private_key(65537, 2048)
+    sig = k.sign(b"test", padding.PKCS1v15(), hashes.SHA256())
+    try:
+        k.public_key().verify(sig, b"tampered", padding.PKCS1v15(), hashes.SHA256())
+    except InvalidSignature:
+        return
+    raise AssertionError("a bad signature verified")
+
+
+def ecdsa_sign_verify():
+    k = ec.generate_private_key(ec.SECP256R1())
+    sig = k.sign(b"test", ec.ECDSA(hashes.SHA256()))
+    k.public_key().verify(sig, b"test", ec.ECDSA(hashes.SHA256()))
+
+
+def fernet_roundtrip():
+    f = Fernet(Fernet.generate_key())
+    assert f.decrypt(f.encrypt(b"zos")) == b"zos"
+
+
+check("version_matches", version_matches)
+check("sha256_known_answer", sha256_known_answer)
+check("aes_cbc_roundtrip", aes_cbc_roundtrip)
+check("rsa_sign_verify", rsa_sign_verify)
+check("rsa_rejects_bad_signature", rsa_rejects_bad_signature)
+check("ecdsa_sign_verify", ecdsa_sign_verify)
+check("fernet_roundtrip", fernet_roundtrip)
+
+print(f"CRYPTO_TOTAL={total}")
+print(f"CRYPTO_FAILURES={failures}")
+raise SystemExit(1 if failures else 0)
+PYEOF
+}
 
 zopen_check_results() {
-  dir="$1"
-  pfx="$2"
-  chk="${dir}/${pfx}_check.log"
+  dir="$1"; pfx="$2"; chk="${dir}/${pfx}_check.log"
 
-  passed=$(grep -c "tests passed" "${chk}" 2>/dev/null); passed=${passed:-0}
-  failed=0
-  # Each "8/8 tests passed" line = one interpreter run; multiply
-  runs=$(grep -c "tests passed" "${chk}" 2>/dev/null); runs=${runs:-0}
-  total=$((runs * 8))
-  passed=$total
+  # zopen-build parses "actualFailures:<n>" and "totalTests:<n>" -- colon
+  # separated, those exact keys. Anything else and the build stops with
+  # "needs to emit an actualFailures:<number> line".
+  #
+  # Sum across runs: the test runs once per interpreter and every run writes to
+  # this one log, so reading a single pair would report a fraction of the
+  # checks and hide a failure on one interpreter behind a later pass.
+  totalTests=$(grep -oE 'CRYPTO_TOTAL=[0-9]+' "${chk}" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}')
+  actualFailures=$(grep -oE 'CRYPTO_FAILURES=[0-9]+' "${chk}" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}')
 
-  echo "* Results for cryptography tests"
-  echo "passed=${passed}"
-  echo "failed=${failed}"
-  echo "total=${total}"
-  echo "expectedFailures=0"
-}
+  # A wheel that cannot be imported kills its run before printing any counts,
+  # which is exactly the failure this port exists to catch, so an interpreter
+  # that started and produced no counts is a failure rather than an absence of
+  # results. Never hardcode failures to zero: a check that cannot report a
+  # failure is not a check.
+  runs=$(grep -c 'CRYPTO_TOTAL=' "${chk}" 2>/dev/null); runs=${runs:-0}
+  interpreters=$(grep -c 'Running tests with Python' "${chk}" 2>/dev/null); interpreters=${interpreters:-0}
+  if [ "${runs}" -lt "${interpreters}" ]; then
+    actualFailures=$((actualFailures + interpreters - runs))
+  fi
 
-zopen_install() {
-  export _BPXK_AUTOCVT=ON
-  export LIBPATH="${ZOPEN_INSTALL_DIR}/lib:${LIBPATH}"
-
-  for pv in 3.12 3.13 3.14; do
-    pv_nodot=$(echo "$pv" | tr -d '.')
-    # Resolve interpreter
-    pyvar="ZOPEN_PYTHON_${pv_nodot}"
-    PY=$(eval "echo \${${pyvar}:-}")
-    [ -n "$PY" ] && [ -x "$PY" ] || PY=$(command -v "python${pv}" 2>/dev/null) || continue
-
-    wheel_url="${WHEEL_BASE_URL}/cryptography-${WHEEL_VERSION}-cp${pv_nodot}-cp${pv_nodot}-os390_29_00_8561.whl"
-    wheel_file="/tmp/cryptography-${WHEEL_VERSION}-cp${pv_nodot}.whl"
-
-    echo "Downloading wheel for Python ${pv}..."
-    curl -fsSL -o "${wheel_file}" "${wheel_url}" || {
-      echo "  SKIP: could not download wheel for Python ${pv}"
-      continue
-    }
-    chtag -b "${wheel_file}"
-
-    echo "Installing for Python ${pv}..."
-    "${PY}" -m pip install --no-deps --force-reinstall "${wheel_file}" 2>&1
-
-    # Tag the native extension .so as binary and make executable
-    SO=$("${PY}" -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")/cryptography/hazmat/bindings/_rust.cpython-${pv_nodot}.so
-    if [ -f "${SO}" ]; then
-      chtag -b "${SO}"
-      chmod +x "${SO}"
-      echo "  Tagged: ${SO}"
-    fi
-  done
-  echo "cryptography installed for all available Python versions"
-}
-
-zopen_check() {
-  export _BPXK_AUTOCVT=ON
-  export LIBPATH="${ZOPEN_INSTALL_DIR}/lib:${LIBPATH}"
-
-  for pv in 3.12 3.13 3.14; do
-    pv_nodot=$(echo "$pv" | tr -d '.')
-    pyvar="ZOPEN_PYTHON_${pv_nodot}"
-    PY=$(eval "echo \${${pyvar}:-}")
-    [ -n "$PY" ] && [ -x "$PY" ] || PY=$(command -v "python${pv}" 2>/dev/null) || continue
-
-    echo "Running tests with Python ${pv}..."
-    "${PY}" -c "
-import cryptography
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.hazmat.primitives import hashes, hmac as _hmac
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.fernet import Fernet
-import os, hashlib
-
-# SHA-256 known-answer
-from cryptography.hazmat.primitives import hashes as _h
-from cryptography.hazmat.backends import default_backend
-d = _h.Hash(_h.SHA256(), backend=default_backend())
-d.update(b'hello z/OS'); r = d.finalize()
-assert r.hex() == '6dc1a19e0cb5f3f43c310e992f8a276fb884d826639af9f6f6b8c3fbbba038e2'
-
-# AES-256-CBC
-k,iv = os.urandom(32), os.urandom(16)
-c = Cipher(algorithms.AES(k), modes.CBC(iv)); e = c.encryptor()
-ct = e.update(b'0123456789abcdef') + e.finalize()
-d2 = c.decryptor(); assert d2.update(ct) + d2.finalize() == b'0123456789abcdef'
-
-# RSA
-rk = rsa.generate_private_key(65537, 2048)
-from cryptography.hazmat.primitives.asymmetric import padding
-sig = rk.sign(b'test', padding.PKCS1v15(), hashes.SHA256())
-rk.public_key().verify(sig, b'test', padding.PKCS1v15(), hashes.SHA256())
-
-# ECDSA
-ek = ec.generate_private_key(ec.SECP256R1())
-s = ek.sign(b'test', ec.ECDSA(hashes.SHA256()))
-ek.public_key().verify(s, b'test', ec.ECDSA(hashes.SHA256()))
-
-# Fernet
-f = Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b'zos')) == b'zos'
-
-print('8/8 tests passed -- ALL OK (Python ${pv})')
-" 2>&1
-  done
+  echo "actualFailures:${actualFailures}"
+  echo "totalTests:${totalTests}"
+  echo "expectedFailures:0"
 }
 
 zopen_append_to_env() {
-  cat << 'ENVEOF'
-# cryptography requires libzoslib at runtime
-if [ -d "${ZOPEN_PKGINSTALL}/zoslib/zoslib/lib" ]; then
-  export LIBPATH="${ZOPEN_PKGINSTALL}/zoslib/zoslib/lib:${LIBPATH}"
-fi
-ENVEOF
+  cat <<ZZ
+PYTHONPATH="\${PYTHONPATH}:\${PWD}/lib/python"
+export PYTHONPATH="\$(deleteDuplicateEntries "\$PYTHONPATH" ":")"
+ZZ
+}
+
+zopen_append_to_validate_install() {
+  echo "python -c \"import cryptography; print('cryptography', cryptography.__version__)\""
 }
