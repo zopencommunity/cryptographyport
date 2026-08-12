@@ -1,6 +1,6 @@
 export ZOPEN_BUILD_LINE="STABLE"
-export ZOPEN_STABLE_TAG="44.0.2"
-export ZOPEN_STABLE_URL="https://github.com/pypa/cryptography/archive/refs/tags/44.0.2.tar.gz"
+export ZOPEN_STABLE_TAG="50.0.0"
+export ZOPEN_STABLE_URL="https://github.com/pypa/cryptography/archive/refs/tags/50.0.0.tar.gz"
 export ZOPEN_STABLE_DEPS="check_python openssl zoslib"
 export ZOPEN_TYPE="BARE"
 export ZOPEN_CATEGORIES="python security"
@@ -16,8 +16,8 @@ export ZOPEN_PYTHON_3_12=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
 export ZOPEN_PYTHON_3_13=/usr/lpp/IBM/cyp/v3r13/pyz/bin/python3
 export ZOPEN_PYTHON_3_14=/usr/lpp/IBM/python/v3r14/pyz/bin/python3
 
-WHEEL_BASE_URL="https://github.com/zopencommunity/cryptographyport/releases/download/v44.0.2"
-WHEEL_VERSION="44.0.2"
+WHEEL_BASE_URL="https://github.com/zopencommunity/cryptographyport/releases/download/v50.0.0"
+WHEEL_VERSION="50.0.0"
 
 zopen_check_results() {
   dir="$1"
