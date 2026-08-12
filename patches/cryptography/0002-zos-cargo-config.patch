@@ -1,0 +1,29 @@
+From: Igor Todorovski <itodorov@ca.ibm.com>
+Date: 2026-08-12
+Subject: [PATCH 2/3] z/OS: add .cargo/config.toml at workspace root
+
+Configures the z/OS cross-compile build:
+- rustc-wrapper injects --extern for proc-macro re-exports (asn1_derive etc.)
+- Links libpython3.12 via z/OS side-deck (.x file)
+- Links libzos_strerror for __strerror_r_ascii needed by OpenSSL 4.0.0
+- Disables s390x SIMD vectorisation (-C target-feature=-vector)
+
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+new file mode 100644
+--- /dev/null
++++ b/.cargo/config.toml
++[build]
++rustc-wrapper = "/home/itodorov/rust_bld/toolchain/rustc-wrapper-crypt.sh"
++
++[target.s390x-ibm-zos]
++linker = "s390x-ibm-zos-cc"
++rustflags = [
++  # Link libpython3.12 via z/OS side-deck (.x import library)
++  "-C", "link-arg=/usr/lpp/IBM/cyp/v3r12/pyz/lib/libpython3.12.x",
++  # libzos_strerror provides __strerror_r_ascii required by OpenSSL 4.0.0 on z/OS.
++  # Pure C stub (no C++ runtime dependency); installed at z/OS path below.
++  "-C", "link-arg=-L/home/itodoro/zopen/usr/local/lib",
++  "-C", "link-arg=-lzos_strerror",
++  # Disable s390x vector (SIMD) target feature
++  "-C", "target-feature=-vector",
++]

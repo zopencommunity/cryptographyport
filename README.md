@@ -46,13 +46,29 @@ print('All crypto operations successful')
 Cross-compiled from Linux-on-Power using the HTTP cross-compile server in
 [compiler/rust-scripts](https://github.ibm.com/compiler/rust-scripts).
 
-Key patches:
-- `__strerror_r_ascii` stub — OpenSSL 4.0.0 requires this ASCII-mode error
-  function; provided as a pure-C stub to avoid C++ runtime dependency from libzoslib
-- rustc wrapper — injects `--extern` for proc-macro re-exports (`pub use asn1_derive::*`)
-  that Cargo 1.86 does not automatically pass for cross-compiled target builds
+Patches are in [`patches/`](patches/) — see [`patches/README.md`](patches/README.md)
+for detailed explanations of each change and full build instructions.
 
-See `cross/patches/cryptography-zos/` in rust-scripts for full build instructions.
+### Quick build overview
+
+```bash
+# 1. Apply patches to cryptography source
+git clone https://github.com/pypa/cryptography && cd cryptography
+git apply ../patches/cryptography/0001-zos-cargo-patches.patch
+mkdir -p .cargo && cp ../patches/cryptography/0002-zos-cargo-config.patch .cargo/config.toml  # see patch for exact content
+
+# 2. Build libzos_strerror.a on z/OS from the stub
+# (see patches/README.md for ibm-clang compile command)
+
+# 3. Set up cross-compile environment and build
+export OPENSSL_DIR=/path/to/zos-sysroot/openssl
+export OPENSSL_STATIC=1
+export PYO3_CONFIG_FILE=.../pyo3-zos-config.txt
+cargo build --release --target s390x-ibm-zos
+```
+
+See `cross/patches/cryptography-zos/` in rust-scripts for the sysroot setup
+and pyo3-zos-config.txt.
 
 ## CVE Fixes
 

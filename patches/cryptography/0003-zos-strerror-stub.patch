@@ -1,0 +1,49 @@
+From: Igor Todorovski <itodorov@ca.ibm.com>
+Date: 2026-08-12
+Subject: [PATCH 3/3] z/OS: add zos_strerror_stub.c for __strerror_r_ascii
+
+OpenSSL 4.0.0 built by zopencommunity calls __strerror_r_ascii() to obtain
+ASCII-mode error strings. This symbol is provided by libzoslib (a C++ library),
+but linking against libzoslib pulls in C++ runtime side-decks that are not
+available when ibm-clang links in C mode.
+
+This pure-C stub implements __strerror_r_ascii using strerror() + __e2a_l()
+(IBM z/OS built-in EBCDIC-to-ASCII converter), avoiding the C++ dependency.
+
+Build on z/OS and install to ~/zopen/usr/local/lib/libzos_strerror.a:
+  chtag -tc ISO8859-1 zos_strerror_stub.c
+  ibm-clang -target s390x-ibm-zos --config=le31.cfg \
+    -fzos-le-char-mode=ascii -c zos_strerror_stub.c -o zos_strerror_stub.o
+  /bin/ar -r ~/zopen/usr/local/lib/libzos_strerror.a zos_strerror_stub.o
+
+diff --git a/zos_strerror_stub.c b/zos_strerror_stub.c
+new file mode 100644
+--- /dev/null
++++ b/zos_strerror_stub.c
++/*
++ * z/OS stub: __strerror_r_ascii
++ *
++ * OpenSSL 4.0.0 built with zopen toolchain calls __strerror_r_ascii()
++ * to get an ASCII error string. On z/OS, strerror() returns EBCDIC;
++ * this function converts it to ASCII via iconv or __e2a_s().
++ *
++ * Signature (inferred from usage in openssl):
++ *   char *__strerror_r_ascii(int errnum, char *buf, size_t buflen);
++ *
++ * Returns buf filled with ASCII error string, or NULL on failure.
++ */
++#include <string.h>
++#include <errno.h>
++
++/* IBM z/OS built-in EBCDIC-to-ASCII converter */
++extern int __e2a_l(char *buffer, size_t buflen);
++
++char *__strerror_r_ascii(int errnum, char *buf, size_t buflen) {
++    char *msg = strerror(errnum);  /* EBCDIC string on z/OS */
++    if (!msg || buflen == 0) return NULL;
++    strncpy(buf, msg, buflen - 1);
++    buf[buflen - 1] = '\0';
++    /* Convert EBCDIC buf to ASCII in-place */
++    __e2a_l(buf, strlen(buf));
++    return buf;
++}
