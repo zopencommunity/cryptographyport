@@ -1,0 +1,15 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Validate buildenv
+        run: |
+          source buildenv
+          echo "ZOPEN_STABLE_TAG=${ZOPEN_STABLE_TAG}"
+          echo "ZOPEN_TYPE=${ZOPEN_TYPE}"

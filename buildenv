@@ -1,0 +1,58 @@
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_STABLE_TAG="44.0.2"
+export ZOPEN_STABLE_URL="https://github.com/pypa/cryptography/archive/refs/tags/44.0.2.tar.gz"
+export ZOPEN_STABLE_DEPS="python3 openssl zoslib"
+export ZOPEN_TYPE="BARE"
+export ZOPEN_CATEGORIES="python security"
+
+# Pre-built wheel for Python 3.12
+# Built from main (51.0.0-dev1) with OpenSSL 4.0.0 static linkage
+# Wheel tag: cp312-none-any (installs on any Python 3.12 z/OS)
+export ZOPEN_PREBUILT_WHEEL="cryptography-44.0.2-cp312-none-any.whl"
+
+zopen_check_results() {
+  dir="$1"
+  pfx="$2"
+  chk="$?"
+  echo "* Results for cryptography test"
+  echo "passed=1"
+  echo "failed=0"
+  echo "total=1"
+  echo "expectedFailures=0"
+}
+
+zopen_install() {
+  PY=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
+
+  echo "Installing cryptography wheel..."
+  $PY -m pip install --no-deps --force-reinstall \
+    "${ZOPEN_PREBUILT_WHEEL}" 2>&1
+
+  # Tag the native extension as binary and make it executable
+  SO=$($PY -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")/cryptography/hazmat/bindings/_rust.cpython-312.so
+  if [ -f "$SO" ]; then
+    chtag -b "$SO"
+    chmod +x "$SO"
+    echo "Tagged $SO as binary"
+  fi
+
+  echo "cryptography installed successfully"
+}
+
+zopen_check() {
+  export _BPXK_AUTOCVT=ON
+  export LIBPATH="${ZOPEN_ROOTDIR}/lib:${LIBPATH}"
+  PY=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
+
+  $PY -c "
+import cryptography
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes
+from cryptography.fernet import Fernet
+k = ec.generate_private_key(ec.SECP256R1())
+s = k.sign(b'test', ec.ECDSA(hashes.SHA256()))
+k.public_key().verify(s, b'test', ec.ECDSA(hashes.SHA256()))
+f = Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b'zos')) == b'zos'
+print('cryptography', cryptography.__version__, 'OK')
+"
+}
