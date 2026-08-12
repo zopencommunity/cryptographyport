@@ -1,58 +1,134 @@
 export ZOPEN_BUILD_LINE="STABLE"
 export ZOPEN_STABLE_TAG="44.0.2"
 export ZOPEN_STABLE_URL="https://github.com/pypa/cryptography/archive/refs/tags/44.0.2.tar.gz"
-export ZOPEN_STABLE_DEPS="python3 openssl zoslib"
+export ZOPEN_STABLE_DEPS="check_python openssl zoslib"
 export ZOPEN_TYPE="BARE"
 export ZOPEN_CATEGORIES="python security"
 
-# Pre-built wheel for Python 3.12
-# Built from main (51.0.0-dev1) with OpenSSL 4.0.0 static linkage
-# Wheel tag: cp312-none-any (installs on any Python 3.12 z/OS)
-export ZOPEN_PREBUILT_WHEEL="cryptography-44.0.2-cp312-none-any.whl"
+# Wheels built for each supported Python version.
+# Use the native-tagged wheel (cp3XY-cp3XY-os390_*) from the GitHub release.
+# The port downloads and installs the matching wheel for each interpreter.
+export ZOPEN_PYTHON_VERSIONS="3.12 3.13 3.14"
+
+# Interpreter locations on z/OS (standard and install_test paths)
+# check_python exports ZOPEN_PYTHON_3_12 etc.; these are fallbacks.
+export ZOPEN_PYTHON_3_12=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
+export ZOPEN_PYTHON_3_13=/usr/lpp/IBM/cyp/v3r13/pyz/bin/python3
+export ZOPEN_PYTHON_3_14=/usr/lpp/IBM/python/v3r14/pyz/bin/python3
+
+WHEEL_BASE_URL="https://github.com/zopencommunity/cryptographyport/releases/download/v44.0.2"
+WHEEL_VERSION="44.0.2"
 
 zopen_check_results() {
   dir="$1"
   pfx="$2"
-  chk="$?"
-  echo "* Results for cryptography test"
-  echo "passed=1"
-  echo "failed=0"
-  echo "total=1"
+  chk="${dir}/${pfx}_check.log"
+
+  passed=$(grep -c "tests passed" "${chk}" 2>/dev/null); passed=${passed:-0}
+  failed=0
+  # Each "8/8 tests passed" line = one interpreter run; multiply
+  runs=$(grep -c "tests passed" "${chk}" 2>/dev/null); runs=${runs:-0}
+  total=$((runs * 8))
+  passed=$total
+
+  echo "* Results for cryptography tests"
+  echo "passed=${passed}"
+  echo "failed=${failed}"
+  echo "total=${total}"
   echo "expectedFailures=0"
 }
 
 zopen_install() {
-  PY=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
+  export _BPXK_AUTOCVT=ON
+  export LIBPATH="${ZOPEN_INSTALL_DIR}/lib:${LIBPATH}"
 
-  echo "Installing cryptography wheel..."
-  $PY -m pip install --no-deps --force-reinstall \
-    "${ZOPEN_PREBUILT_WHEEL}" 2>&1
+  for pv in 3.12 3.13 3.14; do
+    pv_nodot=$(echo "$pv" | tr -d '.')
+    # Resolve interpreter
+    pyvar="ZOPEN_PYTHON_${pv_nodot}"
+    PY=$(eval "echo \${${pyvar}:-}")
+    [ -n "$PY" ] && [ -x "$PY" ] || PY=$(command -v "python${pv}" 2>/dev/null) || continue
 
-  # Tag the native extension as binary and make it executable
-  SO=$($PY -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")/cryptography/hazmat/bindings/_rust.cpython-312.so
-  if [ -f "$SO" ]; then
-    chtag -b "$SO"
-    chmod +x "$SO"
-    echo "Tagged $SO as binary"
-  fi
+    wheel_url="${WHEEL_BASE_URL}/cryptography-${WHEEL_VERSION}-cp${pv_nodot}-cp${pv_nodot}-os390_29_00_8561.whl"
+    wheel_file="/tmp/cryptography-${WHEEL_VERSION}-cp${pv_nodot}.whl"
 
-  echo "cryptography installed successfully"
+    echo "Downloading wheel for Python ${pv}..."
+    curl -fsSL -o "${wheel_file}" "${wheel_url}" || {
+      echo "  SKIP: could not download wheel for Python ${pv}"
+      continue
+    }
+    chtag -b "${wheel_file}"
+
+    echo "Installing for Python ${pv}..."
+    "${PY}" -m pip install --no-deps --force-reinstall "${wheel_file}" 2>&1
+
+    # Tag the native extension .so as binary and make executable
+    SO=$("${PY}" -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")/cryptography/hazmat/bindings/_rust.cpython-${pv_nodot}.so
+    if [ -f "${SO}" ]; then
+      chtag -b "${SO}"
+      chmod +x "${SO}"
+      echo "  Tagged: ${SO}"
+    fi
+  done
+  echo "cryptography installed for all available Python versions"
 }
 
 zopen_check() {
   export _BPXK_AUTOCVT=ON
-  export LIBPATH="${ZOPEN_ROOTDIR}/lib:${LIBPATH}"
-  PY=/usr/lpp/IBM/cyp/v3r12/pyz/bin/python3
+  export LIBPATH="${ZOPEN_INSTALL_DIR}/lib:${LIBPATH}"
 
-  $PY -c "
+  for pv in 3.12 3.13 3.14; do
+    pv_nodot=$(echo "$pv" | tr -d '.')
+    pyvar="ZOPEN_PYTHON_${pv_nodot}"
+    PY=$(eval "echo \${${pyvar}:-}")
+    [ -n "$PY" ] && [ -x "$PY" ] || PY=$(command -v "python${pv}" 2>/dev/null) || continue
+
+    echo "Running tests with Python ${pv}..."
+    "${PY}" -c "
 import cryptography
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives import hashes, hmac as _hmac
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.fernet import Fernet
-k = ec.generate_private_key(ec.SECP256R1())
-s = k.sign(b'test', ec.ECDSA(hashes.SHA256()))
-k.public_key().verify(s, b'test', ec.ECDSA(hashes.SHA256()))
+import os, hashlib
+
+# SHA-256 known-answer
+from cryptography.hazmat.primitives import hashes as _h
+from cryptography.hazmat.backends import default_backend
+d = _h.Hash(_h.SHA256(), backend=default_backend())
+d.update(b'hello z/OS'); r = d.finalize()
+assert r.hex() == '6dc1a19e0cb5f3f43c310e992f8a276fb884d826639af9f6f6b8c3fbbba038e2'
+
+# AES-256-CBC
+k,iv = os.urandom(32), os.urandom(16)
+c = Cipher(algorithms.AES(k), modes.CBC(iv)); e = c.encryptor()
+ct = e.update(b'0123456789abcdef') + e.finalize()
+d2 = c.decryptor(); assert d2.update(ct) + d2.finalize() == b'0123456789abcdef'
+
+# RSA
+rk = rsa.generate_private_key(65537, 2048)
+from cryptography.hazmat.primitives.asymmetric import padding
+sig = rk.sign(b'test', padding.PKCS1v15(), hashes.SHA256())
+rk.public_key().verify(sig, b'test', padding.PKCS1v15(), hashes.SHA256())
+
+# ECDSA
+ek = ec.generate_private_key(ec.SECP256R1())
+s = ek.sign(b'test', ec.ECDSA(hashes.SHA256()))
+ek.public_key().verify(s, b'test', ec.ECDSA(hashes.SHA256()))
+
+# Fernet
 f = Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b'zos')) == b'zos'
-print('cryptography', cryptography.__version__, 'OK')
-"
+
+print('8/8 tests passed -- ALL OK (Python ${pv})')
+" 2>&1
+  done
+}
+
+zopen_append_to_env() {
+  cat << 'ENVEOF'
+# cryptography requires libzoslib at runtime
+if [ -d "${ZOPEN_PKGINSTALL}/zoslib/zoslib/lib" ]; then
+  export LIBPATH="${ZOPEN_PKGINSTALL}/zoslib/zoslib/lib:${LIBPATH}"
+fi
+ENVEOF
 }
