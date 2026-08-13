@@ -25,6 +25,12 @@ CRYPTOGRAPHY_VERSION="50.0.0"
 ###
 
 export ZOPEN_PROJECT_NAME="cryptography"
+# BARE has no source directory to take a name from, so zopen-build falls back to
+# the directory holding this buildenv -- "cryptographyport" -- and never appends the
+# version, because only GIT and LOCAL do that. The pax and the installed
+# version directory then come out as "cryptographyport" instead of "cryptography-<version>".
+# fdport, the reference BARE port, sets this for the same reason.
+export ZOPEN_NAME="cryptography-${CRYPTOGRAPHY_VERSION}"
 export ZOPEN_BUILD_LINE="STABLE"
 export ZOPEN_TYPE="BARE"
 # ZOPEN_TYPE alone does not hold. For a named build line zopen-build overwrites
