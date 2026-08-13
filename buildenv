@@ -27,6 +27,18 @@ CRYPTOGRAPHY_VERSION="50.0.0"
 export ZOPEN_PROJECT_NAME="cryptography"
 export ZOPEN_BUILD_LINE="STABLE"
 export ZOPEN_TYPE="BARE"
+# ZOPEN_TYPE alone does not hold. For a named build line zopen-build overwrites
+# it: with no ZOPEN_STABLE_TYPE it infers the type from ZOPEN_STABLE_URL, and a
+# URL ending in .git becomes GIT. This port has therefore been cloning pyca
+# every build despite declaring itself BARE.
+#
+# Nothing broke here only because cryptography keeps its package under src/. A
+# repo with its package at the root shadows the installed wheel during the
+# check, because zopen_python_test feeds its script to python on stdin and
+# python puts the working directory first on sys.path -- that is exactly what
+# happened to watchfilesport, and it presented as a broken wheel.
+export ZOPEN_STABLE_TYPE="BARE"
+export ZOPEN_DEV_TYPE="BARE"
 
 # Required even though nothing is fetched from it: checkEnv exempts only
 # ZOPEN_TYPE=LOCAL, so a BARE port without a URL stops with "Building from
@@ -207,6 +219,13 @@ zopen_python_test() {
   CRYPTOGRAPHY_EXPECTED_VERSION="${CRYPTOGRAPHY_VERSION}" python - <<'PYEOF'
 import os
 import sys
+
+# The check exists to exercise the *installed* wheel, so the working directory
+# has no business being importable. python reads this script from stdin and so
+# puts "" first on sys.path; if a source tree with this package at its root
+# ever sits beside the build, the import silently resolves there instead and
+# fails as though the wheel had no extension.
+sys.path = [p for p in sys.path if p not in ("", ".")]
 
 failures = 0
 total = 0
