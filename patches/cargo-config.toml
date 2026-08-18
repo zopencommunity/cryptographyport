@@ -1,0 +1,27 @@
+# .cargo/config.toml for cryptography cross-compile to s390x-ibm-zos
+# Place at workspace root: /tmp/cryptography/.cargo/config.toml
+#
+# Replace libpython3.NN.x with the correct version for each build:
+#   3.12: /usr/lpp/IBM/cyp/v3r12/pyz/lib/libpython3.12.x  (system path, no staging needed)
+#   3.13: /home/itodoro/rust_bld/rustcross/sysroot/lib/libpython3.13.x
+#   3.14: /home/itodoro/rust_bld/rustcross/sysroot/lib/libpython3.14.x
+#
+# Note: paths starting with /usr/lpp or SERVER_WORKDIR (~rust_bld/rustcross)
+# are passed through unchanged by server.py's remap_arg(). Other /home/... paths
+# get remapped to the staging tmpdir (breaking the link). Always use one of the
+# above path prefixes for side-deck files.
+
+[build]
+rustc-wrapper = "/home/itodorov/rust_bld/toolchain/rustc-wrapper-crypt.sh"
+
+[target.s390x-ibm-zos]
+linker = "/home/itodorov/rust_bld/toolchain/s390x-ibm-zos-cc"
+rustflags = [
+  # libpython side-deck — update for each Python version (see note above)
+  "-C", "link-arg=/home/itodoro/rust_bld/rustcross/sysroot/lib/libpython3.13.x",
+  # libzos_strerror provides __strerror_r_ascii needed by OpenSSL 4.0.0
+  "-C", "link-arg=-L/home/itodoro/zopen/usr/local/lib",
+  "-C", "link-arg=-lzos_strerror",
+  # Disable s390x vector (SIMD) target feature
+  "-C", "target-feature=-vector",
+]

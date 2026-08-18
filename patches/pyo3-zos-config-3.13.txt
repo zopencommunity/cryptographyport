@@ -1,0 +1,6 @@
+implementation=CPython
+version=3.13
+shared=true
+lib_name=python3.13
+lib_dir=/home/itodoro/install_test/usr/lpp/IBM/cyp/v3r13/pyz/lib
+suppress_build_script_link_lines=true
