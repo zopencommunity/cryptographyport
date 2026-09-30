@@ -1,5 +1,5 @@
 # bump: cryptography-version /CRYPTOGRAPHY_VERSION="(.*)"/ https://github.com/pyca/cryptography.git|semver:*
-CRYPTOGRAPHY_VERSION="50.0.0"
+CRYPTOGRAPHY_VERSION="50.0.2"
 
 ###
 ### Build control file for the cryptography port
